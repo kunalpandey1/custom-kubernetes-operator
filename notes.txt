@@ -1,0 +1,1819 @@
+A controller is a workload that watches the current state of some resource and compares it with the desired state. 
+When/if there is a drift, the desired state is reconciled.
+An operator is a specialized controller that uses Kubernetes API extensions (CRDs ) to define the desired state.
+In short, an operator is a controller but a controller is not necessarily an operator.
+
+
+Controller's are managed by kube controller manager
+it's a forever running loop 
+which observe the state and updates it 
+
+it compares the current state with the desired state
+in case of the drift is recognized 
+so this is actually where you defined what to do [logic]
+
+Controllers and operators needs to be idempotent 
+
+
+if the controller finds the drift between the current state
+and the desired state it acts upon it whatever logic you wrote 
+based on that it will act on it
+
+
+
+for {
+    1. observe() -> updated
+    2. conpares() -> logic
+    3. update -> act
+}
+
+
+so it's a forever running loop that never stops and keep on watching 
+your api server for the resources that you're managing
+
+
+
+
+
+Controller :- A controller is a loop that watches some resources and works to make the actual 
+state match the desired state. Kubernetes ships with many, such as the Deployment, ReplicaSet 
+and Node controllers, all running inside kube-controller-manager. 
+They manage the built-in resource types.
+
+
+
+
+Kubernetes only understands built-in things: Pods, Deployments, Services. 
+It has no idea what an "EC2 instance" is. You can't write kind: EC2Instance 
+and have anything happen.
+
+An operator is how you teach Kubernetes a new thing. After that, 
+it can manage EC2 instances the same way it manages Pods: you declare 
+what you want in YAML, and it makes it real.
+
+
+the controller is a part of the operator, not an instance of it.
+Operator = CRD + controller (the whole package)
+Controller = one component inside it (the loop code)
+
+
+Operator = CRD + controller, deployed together.
+
+For your EC2 project:
+
+CRD: defines EC2Instance as a new resource type
+Controller: your Reconcile() code that calls AWS and keeps things in sync
+Together: that's your operator
+
+
+Operator:- 
+
+An operator is a way to teach Kubernetes how to manage something new, like an EC2 instance, a database, or any other app.
+
+It has two parts:
+
+CRD: adds a new resource type (like EC2Instance) to Kubernetes.
+Controller: code that continuously watches those resources and makes reality match what the user asked for.
+
+
+
+
+
+Kubernetes Operators: Controller Basics
+
+Operator = custom resource (CRD) + custom controller
+
+What is a controller?
+A controller is a forever-running loop that works to make the cluster's actual state match the desired state.
+Built-in example: kube-controller-manager, which runs the core controllers (Deployment, ReplicaSet, Node, etc.).
+An operator is your own custom controller for your own resource type.
+The reconcile loop
+
+for {
+    // 1. Observe: fetch the latest state of the resource (desired vs actual)
+    // 2. Compare: apply logic to find the difference between desired and actual
+    // 3. Act: update/create/delete things to close the gap
+}
+// ...then loop back to step 1
+
+
+
+
+
+Step	Function	            What happens
+1	    observe()	            Read the current/updated state of the resource
+2	    compare()	            Run your logic: what does the spec say vs. what actually exists?
+3	    update() / act()	    Take action to move the actual state toward the desired state
+
+
+
+Idempotency (the key property)
+
+Running the reconcile logic once or 100 times must give the same end result.
+The loop runs repeatedly, and events can be duplicated or missed, so your logic must not blindly "create". It should check first.
+Example: if the EC2 instance already exists and matches the spec, do nothing.
+Example: EC2 Instance operator
+yaml
+kind: EC2Instance        # custom resource
+spec: ...                # desired state
+The user applies an EC2Instance custom resource.
+The custom controller sees it and runs the loop: observe, compare, act.
+Result: a real EC2 instance gets created in AWS (and kept in sync with the spec).
+
+
+One-line summary
+
+An operator watches a custom resource and continuously reconciles reality to match what the user declared, using an idempotent observe → compare → act loop.
+
+In controller-runtime (Kubebuilder / Operator SDK), this loop is your Reconcile() function. The framework handles the "forever loop" and event watching, and you write the compare/act logic inside it.
+
+
+
+
+Here's how it maps to your notes:
+
+Observe: r.Get() fetches the EC2Instance CR (desired state), and DescribeInstances checks what actually exists in AWS.
+Compare: the switch compares the two. It has no instance yet, the instance has drifted from the spec, or it already matches.
+Act: RunInstances creates the instance. The drift case is a TODO, since the fix depends on what you let users change.
+Idempotency: the AWS instance ID is saved in Status.InstanceID. A second run sees it and skips creation, so you never get duplicate instances.
+The forever loop: it isn't in the code. The manager started by SetupWithManager calls Reconcile() on every event, and RequeueAfter makes it re-check AWS every 60 seconds, because AWS can change outside Kubernetes.
+
+The skeleton also includes a finalizer. Without one, deleting the CR would leave the real EC2 instance running and billing you. The finalizer makes Kubernetes wait until your controller has terminated the instance.
+
+Things to fill in yourself:
+
+The cloudv1 types (Spec.AMI, Spec.InstanceType, Status.InstanceID, Status.State), which Kubebuilder generates from your _types.go.
+AWS client setup, including credentials and region.
+Drift handling, plus a check for the instance's terminated or shutting-down state, so you don't treat a dead instance as live.
+
+If you're using Kubebuilder, run make manifests generate after editing the types.
+
+
+
+
+
+
+Reconcile Op path Happy path :- 
+
+
+        +---------------------------------+
+        |  Reconcile function triggered   |
+        +----------------+----------------+
+                         |
+                         v
+        +---------------------------------+
+        |  Get object from request        |
+        +----------------+----------------+
+                         |
+                         v
+        +---------------------------------+
+        |  Observe DESIRED state          |
+        |  (from .spec)                   |
+        +----------------+----------------+
+                         |
+                         v
+        +---------------------------------+
+        |  Observe ACTUAL state           |
+        |  (of the real resource)         |
+        +----------------+----------------+
+                         |
+                         v
+                +----------------+
+                | actual ==      |
+                | desired ?      |
+                +--------+-------+
+                         |
+                        YES
+                         |
+                         v
+        +---------------------------------+
+        |  Do nothing.                    |
+        |  No API calls.                  |
+        +----------------+----------------+
+                         |
+                         v
+        +---------------------------------+
+        |  Exit the loop gracefully       |
+        +---------------------------------+
+
+
+
+
+
+
+
+Reconcile Op path Neutral path :- 
+
+
+
+
+        +---------------------------------+
+        |  Reconcile function triggered   |
+        +----------------+----------------+
+                         |
+                         v
+        +---------------------------------+
+        |  Get object from request        |
+        +----------------+----------------+
+                         |
+                         v
+        +---------------------------------+
+        |  Observe DESIRED state          |
+        |  (from .spec)                   |
+        +----------------+----------------+
+                         |
+                         v
+        +---------------------------------+
+        |  Observe ACTUAL state           |
+        |  (of the real resource)         |
+        +----------------+----------------+
+                         |
+                         v
+                +----------------+
+                | actual ==      |
+                | desired ?      |
+                +--------+-------+
+                         |
+            +------------+------------+
+            |                         |
+           YES                        NO
+            |                         |
+            v                         v
+  +------------------+    +---------------------------+
+  | Do nothing.      |    | Calculate the difference  |
+  | No API calls.    |    | and take action:          |
+  |                  |    | create / update / delete  |
+  +--------+---------+    +-------------+-------------+
+           |                            |
+           |                            v
+           |                   +----------------+
+           |                   | Action         |
+           |                   | succeeded ?    |
+           |                   +--------+-------+
+           |                            |
+           |               +------------+------------+
+           |               |                         |
+           |              YES                        NO
+           |               |                         |
+           |               v                         v
+           |    +--------------------+    +----------------------+
+           |    | Update .status     |    | Return error         |
+           |    | field              |    | -> requeue           |
+           |    +---------+----------+    | (self-healing)       |
+           |              |               +-----------+----------+
+           |              |                           |
+           v              v                           |
+  +-----------------------------------+               |
+  |  Exit the loop gracefully         |               |
+  +-----------------------------------+               |
+                                                      |
+                    (Reconcile is called again) <-----+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Reconcile OP path Sad path :- 
+
+
+        +---------------------------------+
+        |  Reconcile function triggered   |<-----+
+        +----------------+----------------+      |
+                         |                       |
+                         v                       |
+        +---------------------------------+      |
+        |  Get object from request        |      |
+        +----------------+----------------+      |
+                         |                       |
+                         v                       |
+        +---------------------------------+      |
+        |  Observe DESIRED state          |      |
+        |  (from .spec)                   |      |
+        +----------------+----------------+      |
+                         |                       |
+                         v                       |
+        +---------------------------------+      |
+        |  Observe ACTUAL state           |      |
+        |  (of the real resource)         |      |
+        +----------------+----------------+      |
+                         |                       |
+                         v                       |
+                +----------------+               |
+                | actual ==      |               |
+                | desired ?      |               |
+                +--------+-------+               |
+                         |                       |
+                        YES                      |
+                         |                       |
+                         v                       |
+        +---------------------------------+      |
+        |  Do nothing.                    |      |
+        |  No API calls.                  |      |
+        +----------------+----------------+      |
+                         |                       |
+                         v                       |
+        +---------------------------------+      |
+        |  Exit the loop gracefully       |      |
+        +----------------+----------------+      |
+                         |                       |
+                         v                       |
+        +---------------------------------+      |
+        |  MISTAKE: unconditionally       |      |
+        |  update object                  |------+  back to step 1
+        |  (.status.lastSync)             |
+        +---------------------------------+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Reconcile Loop: Core Rules :- 
+
+The most important question
+
+1. "Is there anything for me to do?" If no, exit immediately.
+
+Every Reconcile run starts with this check. If actual already equals desired, 
+return right away without calling any APIs.
+
+2. Golden rule
+
+Only write to the API server (including status updates) when the actual state differs from the desired state.
+
+This is the rule the sad-path diagram broke. 
+Writing .status.lastSync on every run changes the 
+object, which fires a watch event, which triggers Reconcile again, 
+so the loop never settles.
+
+3. Stateless
+
+The controller does not remember what it did last time.
+It can crash, restart, and figure out the state of the world from 
+scratch just by observing.
+Because of this, never rely on in-memory variables between runs. 
+Each run re-reads the desired state (.spec) and the actual state (e.g. AWS) 
+and decides from there.
+
+
+4. Idempotent
+
+Running the loop 100 times on a system that is already in 
+the desired state results in zero changes after the first check.
+Running again doesn't break anything.
+
+
+
+
+
+
+Statelessness in your EC2 operator: the controller keeps no memory in the 
+process. Whatever it needs to remember lives outside it, in the API server 
+(the EC2Instance CR and its .status.instanceId) and in AWS itself. 
+That is how the skeleton avoids creating a duplicate instance after a restart.
+
+
+
+
+
+
+CRD / CR / Operators :- 
+
+
+Whenever you instantiate a custom resource definition is a custom resource
+
+CRD is the schema let say for a particular ec2 instance:- 
+CRD: tells Kubernetes "a resource called EC2Instance exists, and it has 
+these fields (ami, instanceType), with these types and rules." 
+You apply it once.
+
+CR: an instance of that schema, with the actual values. 
+You apply one for every EC2 instance you want.
+
+
+
+eg:- 
+
+CRD  →  "an EC2Instance has an ami (string) and an instanceType (string)"
+CR   →  "my-server: ami-0abc..., instanceType t3.micro"
+CR   →  "my-server-2: ami-0def..., instanceType t3.large"
+
+
+
+The CRD says what can be written, and the CR says what is written. 
+The CRD also doesn't know how to create anything in AWS. Its job 
+is only to make the API server accept and validate EC2Instance objects. 
+The controller is what reads each CR and calls AWS.
+
+
+
+so controller will be acting upon your custom resources
+
+
+
+
+
+
+
+
+
+
+Kubernetes is not just a platform. It's now an OS 
+how you can expand kubernetes sdk and can perform development in other platforms
+
+Kubernetes as an "OS": Extensibility Notes
+
+The idea: Kubernetes isn't only a container platform anymore. 
+Like an operating system, it provides a core (the API server, the reconcile 
+loops) and lets you plug in and extend almost everything around it. 
+Your EC2 operator is an example: Kubernetes ends up managing AWS resources,
+which it knows nothing about out of the box.
+
+
+
+1. Extensibility: add your own resource types and logic
+
+Item	                        Meaning
+Custom resources	            Add new API types (like EC2Instance) via CRDs. There's no fixed limit on what you can add.
+Operators	                    Encode your business or operational logic (CRD + controller).
+Controllers	                    The reconcile loops that give the self-healing behaviour.
+
+
+
+
+2. API-first: everything goes through the API
+
+Item	                        Meaning
+Everything is an API	        Pods, Services, CRDs and your own resources are all REST objects served by the API server.
+Client libraries	            Official and community clients exist for Go (client-go), Python, Java, JavaScript and more, so you aren't locked into one language.
+Backwards compatibility	        APIs are versioned (v1alpha1, v1beta1, v1) with deprecation policies, so stable APIs don't break existing clusters.
+
+
+
+
+
+3. Plugin universe: swap out the parts underneath
+
+Interface	                        What it plugs in	                Examples
+CNI (Container Network Interface)	Networking	                        Calico, Cilium, Flannel
+CSI (Container Storage Interface)	Storage	                            EBS CSI, Ceph
+CRI (Container Runtime Interface)	Container runtime	                containerd, CRI-O
+Webhooks	Intercept API requests (admission): validate or modify
+                                     objects before they're saved	    Policy engines like Kyverno or OPA Gatekeeper
+
+
+
+
+
+
+
+
+so it's not just a container orchestrator - it's the CLOUD OS SDK
+
+
+
+
+cluster.yaml on k3d:- 
+
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: ec2-operator
+servers: 1
+agents: 2
+
+
+
+
+create a cluster from it :- 
+
+k3d cluster create --config cluster.yaml
+
+
+kubectl cluster-info
+
+
+we would have gotten 2 agents which is our worker node
+
+
+
+
+7fab89f828ce   ghcr.io/k3d-io/k3d-proxy:5.9.0   "/bin/sh -c nginx-pr…"   5 minutes ago   Up 4 minutes   0.0.0.0:64274->6443/tcp     k3d-ec2-operator-serverlb   -> nginx proxy container to talk to your api server 
+550a9556ea52   rancher/k3s:v1.35.5-k3s1         "/bin/k3d-entrypoint…"   5 minutes ago   Up 5 minutes                               k3d-ec2-operator-agent-1    -> worker node
+c25ba7d0e9ec   rancher/k3s:v1.35.5-k3s1         "/bin/k3d-entrypoint…"   5 minutes ago   Up 5 minutes                               k3d-ec2-operator-agent-0.   -> worker node
+6bedf48dedf5   rancher/k3s:v1.35.5-k3s1         "/bin/k3d-entrypoint…"   5 minutes ago   Up 5 minutes                               k3d-ec2-operator-server-0   -> server
+
+
+
+
+
+kubectl get nodes
+kubectl get svc
+kubectl get pods -A :- lists all running pods across every namespace in your Kubernetes cluster
+
+
+
+do a smoke testing:- 
+
+ kubectl create deployment mydeployment --image=docker.io/nginx:alpine
+
+ kubectl get pods
+
+
+ kubectl logs mydeployment-594cd6d748-sw85t :- It's the startup log of an nginx container, running inside a Pod in your cluster.
+
+
+
+
+imp:- 
+
+what is service in kubernetes ? 
+
+
+
+Service in Kubernetes
+
+A Service gives a group of Pods one stable address that other 
+things can use to reach them.
+
+The problem it solves
+
+Pods are temporary. They get created and destroyed, and every new Pod gets a new IP address. If you have 3 nginx Pods, their IPs change whenever one restarts or gets replaced. Nothing can safely hardcode a Pod's IP.
+
+A Service sits in front of the Pods:
+
+Client ──► Service (stable name + IP) ──► Pod 1
+                                      ├─► Pod 2
+                                      └─► Pod 3
+The Service has a fixed IP and a DNS name (e.g. nginx-svc) that never changes.
+It load-balances traffic across the healthy Pods behind it.
+It finds those Pods using labels, so it keeps working as Pods come and go.
+
+This is the "DNS just works" line from your slide.
+
+Why write a YAML file for it
+
+Because of the declarative approach from your notes: you say what you want, not how. The YAML is the desired state of the Service, and Kubernetes creates and maintains it. You could also run kubectl expose, but a YAML file can be kept in Git, reviewed in a PR, and re-applied (the GitOps point).
+
+Example
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-svc
+spec:
+  selector:
+    app: nginx        # sends traffic to Pods with this label
+  ports:
+    - port: 80        # port the Service listens on
+      targetPort: 80  # port on the Pod's container
+  type: ClusterIP
+
+selector is the key part. It must match the labels on your Pods, or the Service has nothing to send traffic to.
+
+Service types:-
+Type	                    Reachable from
+ClusterIP (default)	        Only inside the cluster
+NodePort	                Outside, via a port on each node
+LoadBalancer	            Outside, via a cloud load balancer
+
+
+
+
+what we gonna do is :- 
+_ _ _ _ _ _ _ _ _ _ _  
+|                    |
+Pod <── svc <──  Pod
+
+Service = a stable address (fixed IP + DNS name) in front of a group of Pods.
+
+Pods are temporary, and every new Pod gets a new IP, so you can't rely on Pod IPs.
+A client Pod sends its request to the Service, and the Service forwards it to a destination Pod. The client gets the Pod's response without knowing its IP.
+The Service finds its Pods using labels (selector) and load-balances across the healthy ones.
+Defined in a YAML file, following the declarative approach (say what, not how).
+
+
+
+create service for the pods which you just deployed :- 
+
+kubectl expose deployment mydeployment --port 80
+
+even you can write a yaml and could've done 
+kubectl get svc mydeployment
+kubectl get endpoints mydeployment   # shows the Pod IPs behind it
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: mydeployment
+spec:
+  type: ClusterIP
+  selector:
+    app: mydeployment   # copied from the Deployment's labels
+  ports:
+    - port: 80
+      targetPort: 80
+
+
+
+
+just for info dont run this two command down below:- 
+
+# Different Service port vs container port
+kubectl expose deployment mydeployment --port 80 --target-port 8080
+
+# Reachable from outside the cluster
+kubectl expose deployment mydeployment --port 80 --type NodePort
+
+
+
+
+
+
+Now create a second pod which will hit the svc of mydeployment pod
+
+kubectl run curl --image=curlimages/curl:8.15.0 -- -L -v http://10.43.88.66
+
+
+It starts a temporary Pod named curl that sends an HTTP request to http://10.43.88.66 from inside your cluster, then exits.
+
+
+
+do kubectl logs curl 
+
+to see what response it gets from nginx pod which is mydeployment
+
+
+
+
+you can also check whether your cluster has external connectivity 
+because we'll be talking to AWS
+
+
+run a pod name google to test external connectivity with google:- 
+
+kubectl run google --image=curlimages/curl:8.15.0 -- -L -v https://www.google.com
+kubectl get pods
+
+kubectl logs google
+
+
+
+
+
+
+command to give to do the kubebuilder setup:- 
+
+
+kubebuilder init \
+  --domain cloud.com \
+  --repo github.com/kunalpandey1/custom-kubernetes-operator \
+  --project-name custom-kubernetes-operator
+
+
+
+
+Think of kubebuilder init like npx create-react-app or git init. It creates the starting skeleton for a new project. At this stage you have no CRD and no controller, only the empty shell that will hold them.
+
+The command answers three questions about your project: what is its domain, where does the code live (repo), and what is it called (project-name).
+
+The three flags
+1. --domain cloud.com
+
+Question it answers: "What namespace should my API names live under?"
+
+Every custom resource belongs to an API group, written as <group>.<domain>. The domain makes your group globally unique, so your EC2Instance can't clash with someone else's.
+
+group (you choose later) + domain (you chose now) = full API group
+compute                  + cloud.com               = compute.cloud.com
+
+It shows up in your CR's apiVersion:
+
+
+apiVersion: compute.cloud.com/v1
+kind: EC2Instance
+
+
+
+Real examples: apps (built-in), cert-manager.io, monitoring.coreos.com. It works like a Java package name (com.company.app).
+
+2. --repo github.com/kunalpandey1/custom-kubernetes-operator
+
+Question it answers: "What is my Go module called?"
+
+This is the Go module path. It's written into go.mod and used in every Go import inside your project:
+
+
+import computev1 "github.com/kunalpandey1/custom-kubernetes-operator/api/v1"
+
+
+
+It should match where you'll push the code. It doesn't have to exist on GitHub yet, but if you want others to go get it later, the path must match the real repo.
+
+3. --project-name custom-kubernetes-operator
+
+Question it answers: "What do I call this operator in Kubernetes?"
+
+This name is used to build the names of the Kubernetes objects that deploy your operator:
+
+Namespace:   custom-kubernetes-operator-system
+Deployment:  custom-kubernetes-operator-controller-manager
+
+It must be lowercase letters, digits and - only, because Kubernetes enforces that on resource names. This is the rule your folder name Kubernetes Operator broke earlier. The flag lets you override the folder name.
+
+
+
+
+Don't mix these up
+
+Thing	              Goes where	                                    Example
+
+domain	            API group of your CRs	                          compute.cloud.com
+repo	              Go imports, go.mod	                            github.com/kunalpandey1/...
+project-name	      Names of the deployed operator objects	        custom-kubernetes-operator-system
+
+
+What the command actually generates
+
+From these three answers, it writes the files you saw in your project tree:
+
+go.mod: contains the repo path
+cmd/main.go: the entry point that starts the manager
+config/: Kustomize YAMLs that use the project name and domain
+Makefile, Dockerfile: build and deploy commands
+PROJECT: a file recording your domain, repo and name, so later commands like create api know them
+
+That's why you pass these flags once at the start. Kubebuilder saves them in PROJECT, and every later command reads them from there.
+
+
+
+
+
+
+kubebuilder create api --group compute --version v1 --kind EC2Instance
+
+
+Part	                      Meaning
+
+kubebuilder	                The CLI tool
+create api	                Add a new API (a custom resource type) to the existing project. It only works after init, because it reads your domain and repo from the PROJECT file.
+--group compute	            The API group: a category that holds related resource types
+--version v1	              The API version of this type
+--kind EC2Instance	        The resource Kind: the name of the new type. It must start with an uppercase letter.
+
+How the three flags combine
+
+Together they form the GVK (Group, Version, Kind), the full identity of your 
+resource in Kubernetes:
+
+Group:    compute.cloud.com     (compute + your domain from init)
+Version:  v1
+Kind:     EC2Instance
+
+That's what users write in the YAML:
+
+yaml
+apiVersion: compute.cloud.com/v1     # group/version
+kind: EC2Instance                    # kind
+
+Kubebuilder also derives the plural, ec2instances, 
+which is what appears in kubectl get ec2instances 
+and in the CRD name ec2instances.compute.cloud.com.
+
+The two prompts
+
+Create Resource [y/n]    → generate the Go type for the CRD
+Create Controller [y/n]  → generate the controller (Reconcile loop)
+
+Resource = the CRD side of your operator.
+Controller = the loop side.
+
+Answering y to both gives you the full operator = CRD + controller 
+from your earlier notes. You can skip the prompts with --resource --controller.
+
+What it generates
+
+File	                                                What it is
+
+api/v1/ec2instance_types.go	                          The CRD definition in Go. You define 
+                                                      EC2InstanceSpec (desired state: AMI, instance type) 
+                                                      and EC2InstanceStatus (actual state: instance ID, state) here.
+
+api/v1/groupversion_info.go	                          Registers the group and version with the scheme. You rarely touch it.
+
+internal/controller/ec2instance_controller.go	        Your controller. It has an empty Reconcile() where the observe, compare, act logic goes.
+
+internal/controller/suite_test.go and 
+ec2instance_controller_test.go	                      Test scaffolding for the controller
+
+config/crd/, config/rbac/	                            Kustomize files that will carry the generated CRD and the permissions your controller needs
+
+config/samples/compute_v1_ec2instance.yaml	          An example CR you can edit and apply
+
+It also edits files that already exist:
+
+cmd/main.go: registers your new type and starts your controller in the manager
+PROJECT: records this API, so later commands know it exists
+
+It then runs make generate by default (--make=true), which produces the zz_generated.deepcopy.go code Kubernetes types need.
+
+zz_generated.deepcopy.go is a Go file that's generated automatically 
+(by a tool called controller-gen) and contains DeepCopy methods for 
+every type in your api/v1 package. You never write or edit it. 
+The first line says DO NOT EDIT.
+
+
+
+The flow from here
+
+create api (done)
+   ↓
+edit api/v1/ec2instance_types.go   → define Spec and Status fields
+   ↓
+make manifests                     → turns your Go types into the CRD YAML
+   ↓
+edit ec2instance_controller.go     → write Reconcile()
+   ↓
+make install                       → applies the CRD to your k3d cluster
+make run                           → runs the controller locally against it
+
+Two things to know
+
+Spec vs Status: the generated types file has Spec and Status structs with 
+placeholder fields (a Foo field, for example). Replace them with your own. 
+This is the CRD schema we talked about.
+
+Version choice: v1 is fine for learning. Real projects often start 
+with v1alpha1 to signal that the API may change. Changing a version 
+later means adding a new one, not renaming, so it's a decision worth 
+making early.
+
+
+
+
+
+
+Why it's called "create api"
+
+
+Yes. create api defines the API for your custom resource: the Go 
+type (EC2Instance with its Spec and Status), the group, version and kind, 
+and the registration that makes Kubernetes understand it. 
+The CRD YAML comes later, when make manifests converts that Go type.
+
+In Kubernetes, every resource type is an API. 
+Pod is an API at /api/v1/pods, and Deployment is an API at 
+/apis/apps/v1/deployments. When you add a CRD, you are adding 
+a new API endpoint to the API server:
+
+/apis/compute.cloud.com/v1/namespaces/<ns>/ec2instances
+
+So "create api" means "add a new API (resource type) to my operator." 
+It is the same idea as the "everything is an API" line from your slide.
+
+What it actually generates
+
+It doesn't generate the CRD yaml or a CR directly. This is the exact split:
+
+
+
+You expected	                What actually happens
+
+CRD	                          It generates the Go struct (ec2instance_types.go). The CRD YAML is produced later by make manifests, which reads your Go structs.
+CR	                          It generates a sample CR in config/samples/, with placeholder fields. Real CRs are what users apply later.
+(not mentioned)	              The controller with an empty Reconcile(), and zz_generated.deepcopy.go
+
+
+So the CRD is not written by hand as YAML. You define the schema in Go and Kubebuilder converts it:
+
+ec2instance_types.go  --(make manifests)-->  CRD YAML  --(make install)-->  your cluster
+
+
+
+
+
+
+
+
+
+
+Create multiple api's in a single project or domain :- 
+
+
+One project and one domain can hold many APIs, organized into groups.
+
+What the diagram shows
+
+cloud.com                     ← domain (set once at init)
+│
+├── compute   → EC2, ..., SG   ← group, with several kinds inside
+├── storage   → EBS, S3
+└── network   → VPC, Firewall
+
+Level	                  Example	                          Set by
+Domain	                cloud.com	                        init (once)
+Group	                  compute, storage, network	        --group in create api
+Kind	                  EC2Instance, S3Bucket, VPC	      --kind in create api
+
+
+How you'd build it
+
+You run create api once per kind:
+
+
+kubebuilder create api --group compute --version v1 --kind EC2Instance
+kubebuilder create api --group storage --version v1 --kind S3Bucket
+kubebuilder create api --group network --version v1 --kind VPC
+
+The result is one operator that has three CRDs, with a controller for each:
+
+apiVersion: compute.cloud.com/v1
+kind: EC2Instance
+---
+apiVersion: storage.cloud.com/v1
+kind: S3Bucket
+---
+apiVersion: network.cloud.com/v1
+kind: VPC
+
+This is the same pattern as the AWS Controllers for Kubernetes 
+and Crossplane projects I mentioned earlier. One project, many resource types.
+
+One catch: multiple groups
+
+A Kubebuilder project is single-group by default, with the 
+layout api/v1/. To add a second group like storage, enable 
+multigroup mode first:
+
+
+kubebuilder edit --multigroup=true
+
+The layout then becomes api/compute/v1/, api/storage/v1/, 
+and so on. It's best to run this before you create your first API. 
+If you already have EC2Instance in api/v1/, enabling it later means 
+moving that folder and updating the imports.
+
+Multiple kinds in the same group, like EC2Instance and a security 
+group both under compute, don't need multigroup. They just share api/v1/.
+
+
+
+
+KubeConfig :- 
+
+
+
+A kubeconfig is a YAML file that tells kubectl (and any Kubernetes client) 
+how to connect to a cluster: where the API server is, and which credentials 
+to use. By default it lives at ~/.kube/config.
+
+basically, A kubeconfig file is a YAML file that stores cluster endpoints, authentication credentials, 
+and context settings so tools like kubectl can connect to and manage Kubernetes clusters
+
+Think of it like a saved login for a server: address plus credentials. 
+Without it, kubectl wouldn't know which cluster to talk to.
+
+so, If I am using kind or minikube, they create the kubeconfig file, and kubectl uses it to run commands, which then go to the API server.
+
+Who creates it
+
+You don't write it by hand. It's created by whatever tool creates or connects you to the cluster:
+
+Cluster type	                  What generates the kubeconfig
+k3d (yours)	                    k3d cluster create adds an entry to ~/.kube/config automatically
+kind / minikube	                Same: kind create cluster, minikube start
+AWS EKS	                        aws eks update-kubeconfig --name <cluster>
+Google GKE	                    gcloud container clusters get-credentials <cluster>
+Azure AKS	                      az aks get-credentials ...
+Self-managed (kubeadm)	        kubeadm creates /etc/kubernetes/admin.conf, which you copy to ~/.kube/config
+
+
+The cluster itself holds the real credentials. The tool just writes them 
+into your kubeconfig so kubectl can use them.
+
+Merging
+
+If you already have a kubeconfig, these tools merge the new cluster 
+into it instead of replacing it. That's why ~/.kube/config can hold 
+several clusters, such as two k3d clusters plus an EKS cluster, 
+and you switch between them with kubectl config use-context.
+
+
+
+to see the kubeconfig file:- 
+
+cat ~/.kube/config
+kubectl config get-contexts          # list contexts
+kubectl config current-context       # which cluster you're talking to
+kubectl config use-context <name>    # switch cluster
+
+
+
+it's like this :-
+
+
+apiVersion: v1
+kind: Config
+clusters:
+  - name: k3d-mycluster
+    cluster:
+      server: https://0.0.0.0:6443              # API server address
+      certificate-authority-data: LS0tLS1CRUdJTi...   # to trust the server
+users:
+  - name: admin@k3d-mycluster
+    user:
+      client-certificate-data: LS0tLS1CRUdJTi...      # your credentials
+      client-key-data: LS0tLS1CRUdJTi...
+contexts:
+  - name: k3d-mycluster
+    context:
+      cluster: k3d-mycluster
+      user: admin@k3d-mycluster
+current-context: k3d-mycluster                  # which one kubectl uses right now
+
+
+
+
+
+
+
+
+
+
+
+
+
+KubeBuilder Architecture:- 
+
+HA stands for high availability. It means running more than one copy 
+of your operator, so if one copy crashes or its node goes down, 
+another copy is already running and can take over. With only one copy, 
+a crash means nothing reconciles until Kubernetes restarts it.
+
+The problem is that two copies running at the same time would both see the 
+same EC2Instance change and both call Reconcile(). Both could then ask AWS 
+to create an instance, and you'd end up with duplicates or the two copies 
+overwriting each other's updates.
+
+Leader election solves this by choosing one copy to be the leader. 
+Only the leader runs the controllers and reconciles resources. The other 
+copies stay running as standbys and do nothing except keep checking on 
+the leader.
+
+It works through a shared object in the cluster, usually a Lease. The 
+leader keeps renewing that Lease every few seconds, which tells the others 
+it is still alive. If the leader crashes and stops renewing, the Lease 
+expires, one of the standby copies grabs it and becomes the new leader, 
+and reconciling continues with only a short pause.
+
+In your project, this is controlled by a flag in main.go:
+
+--leader-elect=true
+
+
+Kubebuilder turns it on in the deployed manifests, which is why you'll 
+see an ID like <something>.cloud.com in main.go. That's the name of the Lease. 
+When you test locally with make run, you run a single copy, so leader 
+election isn't needed and is off by default.
+
+To note it down: leader election makes sure only one copy of your operator 
+reconciles at a time when several are running for high availability, and if 
+the leader dies, another copy takes over.
+
+
+
+
+
+
+This diagram shows the architecture of controller-runtime, the library 
+your Kubebuilder project is built on. It shows how the pieces inside your 
+operator's process fit together. The outer box is the process (your main.go), 
+and everything else sits inside it.
+
+main.go is responsible to create manager using controller runtime
+
+Process (main.go)
+└── Manager
+    ├── Client, Cache, ...        (shared tools)
+    ├── Controller
+    │   ├── Predicate             (filters events)
+    │   └── Reconciler            (your logic)
+    └── Webhook
+        ├── Defaulter             (fills in missing fields)
+        └── Validator             (rejects bad objects)
+1. Process (main.go)
+
+This is your running operator, one program. The diagram 
+says there is one per cluster, or several if you run it in HA 
+(high availability) mode. With several copies, only one is active at a time, 
+and the others wait as standby.
+
+2. Manager
+
+sigs.k8s.io/controller-runtime/pkg/manager
+
+The manager is the top-level coordinator, with one per process. 
+It's what ctrl.NewManager(...) creates in main.go, and it runs the "forever loop" 
+from your first notes. Its jobs, from the diagram:
+
+Job	                        Meaning
+
+Leader election (HA)	      When several copies run, picks one to be active so two operators don't reconcile the same resource at once
+Exports metrics	            The metrics endpoint (the metricsserver import)
+Handles webhook certs	      Manages the TLS certificates that webhooks need
+Caches events	              Owns the shared cache
+Holds clients	              Owns the client used to talk to the API server
+Broadcasts events 
+to controllers	            Passes resource-change events to the right controller
+Handles signals 
+and shutdown	              Shuts down cleanly on Ctrl+C or when the Pod is stopped
+
+
+1. Client
+
+Communicates with the API server, handling authentication and protocols. 
+It's what r.Get(), r.Update() and r.Status().Update() use in your reconciler. 
+It reads the kubeconfig when you run locally and uses the ServiceAccount 
+token when running inside the cluster.
+
+
+2. Cache
+
+Holds recently watched or fetched objects, used by controllers and webhooks. It's built on the client.
+
+Reads in your Reconcile() (r.Get(...)) normally come from the cache, not from a live API call. This makes reconciling fast and spares the API server. Writes go directly to the API server.
+
+The catch is that the cache can be slightly stale. This is why the rules from your notes matter: don't trust old values, observe the world each time, and make every action idempotent. It's also why you DeepCopy() before modifying an object, so you don't corrupt the cache.
+
+The ... boxes
+
+These mean there are other components (other clients, other caches, etc.) that the diagram doesn't list.
+
+3. Controller
+
+sigs.k8s.io/controller-runtime/pkg/controller
+
+The diagram describes it as:
+
+One per Kind that is reconciled. Your EC2Instance gets its own controller, 
+and a future S3Bucket would get another.
+
+Owns resources created by it. If your controller creates other objects 
+(a ConfigMap, a Job), it can mark itself as their owner (Owns(...)). 
+Changes to those objects then trigger reconciles of the parent, and 
+deleting the parent cleans them up.
+
+Uses caches and clients, and gets events via filters.
+
+Calls a Reconciler each time it gets an event.
+
+Handles back-off, queuing and re-queuing. Events go into a work queue. 
+If Reconcile() returns an error, the controller retries with an increasing 
+delay. This is the self-healing from your sad path (return an error and 
+the controller requeues).
+
+
+
+Event → Predicate → Reconciler
+
+This is the flow shown by the big downward arrow labelled Filter:
+
+Event ──► Predicate (filter) ──► Reconciler
+
+Event: something changed in the cluster, such as an EC2Instance created, 
+updated or deleted.
+
+Predicate (pkg/predicate): filters the stream of events and passes only 
+those that need action to the reconciler. Without it, every tiny change 
+triggers a reconcile.
+
+This is the fix for the sad-path loop we discussed. If your controller 
+writes .status, that causes an event, which triggers Reconcile again. 
+A predicate such as GenerationChangedPredicate ignores events where only 
+the status changed and the spec didn't, which breaks the loop.
+
+Reconciler (pkg/reconciler): "user-provided logic is added into the reconciler.
+Reconcile function." Everything else in the diagram is framework code. 
+This is the one box you write: the observe, compare, act logic inside 
+Reconcile() in ec2instance_controller.go.
+
+
+
+4. Webhook
+
+sigs.k8s.io/controller-runtime/pkg/webhook
+
+The diagram says: zero or one webhooks, one per Kind. They're optional. 
+Your operator works without any.
+
+Webhooks sit in a different place from the controller. 
+They run before an object is saved to the cluster, when a user does 
+kubectl apply. The controller, by contrast, acts after the object is saved.
+
+kubectl apply ──► API server ──► AdmissionRequest ──► Defaulter ──► Validator ──► saved
+
+AdmissionRequest: the API server asks your webhook, "someone is 
+creating or updating this object, what do you think?"
+
+Defaulter ("sets unset fields in spec"): fills in missing values. 
+If the user leaves out type, the defaulter could set type: t3.micro. 
+This is called a mutating webhook.
+
+Validator ("rejects poorly formed objects"): rejects bad input with a 
+clear error. For example, if amiID is empty or doesn't start with ami-, 
+the request is refused immediately. This is called a validating webhook.
+
+For EC2Instance this is useful, because a bad AMI ID caught by the 
+Validator fails right at kubectl apply, instead of failing later inside 
+the controller when AWS rejects it.
+
+How it all fits together
+
+1. User runs kubectl apply -f ec2.yaml
+2. API server calls the Webhook:   Defaulter fills gaps → Validator checks → object saved
+3. Manager's Cache sees the change and sends an Event to the Controller
+4. Predicate decides if the event matters
+5. Controller queues it and calls Reconciler.Reconcile()
+6. Your logic: observe → compare → act (calls AWS), then writes Status
+7. On error, Controller retries with back-off
+
+
+
+
+
+
+Mapping to your project
+
+Diagram box	                        In your project
+Process	                            cmd/main.go
+Manager	                            ctrl.NewManager(...) in main.go
+Client / Cache	                    The r.Client embedded in EC2InstanceReconciler
+Controller	                        Set up by SetupWithManager(mgr) in ec2instance_controller.go
+Predicate	                          Optional, added with WithEventFilter(...) in SetupWithManager
+Reconciler	                        The Reconcile() function you'll write
+Webhook	                            Optional, added later with kubebuilder create webhook
+Leader election, metrics, health	  Flags in main.go (--leader-elect, --metrics-bind-address)
+webhook, healthz, metricsserver 
+imports	                            Exactly the imports you asked about earlier
+
+
+
+Most of this diagram is machinery that Kubebuilder wires up for you. 
+The part you write is the Reconciler, and optionally a Predicate and 
+webhooks later.
+
+
+
+
+
+
+
++----------------------------------------------+        +------------------------------+
+|  YOUR MACHINE (project)                      |        |  CLUSTER                     |
+|                                              |        |                              |
+|   (user)                                     |        |   +----------------------+   |
+|     |                                        |        |   |  CRD  (V1, old)      |   |
+|     v                                        |        |   |  gets replaced       |   |
+|  +-----------------+                         |        |   +----------+-----------+   |
+|  | change in spec  |                         |        |              ^               |
+|  | (Go types)      |                         |        |              |               |
+|  +--------+--------+                         |        |              v               |
+|           |                                  |        |   +----------------------+   |
+|           v                                  |        |   |  CR                  |   |
+|  +-----------------+                         |        |   |  (EC2Instance        |   |
+|  | CRD  (V2, new)  |-------------------------+--------+-->|   objects)           |   |
+|  +-----------------+     make install       |        |   +----------------------+   |
+|           ^                                  |        |                              |
+|           |                                  |        +------------------------------+
+|   make manifests                             |
+|   (generates CRD YAML from Go types)         |
++----------------------------------------------+
+                      |
+                      |  uses
+                      v
+              +---------------+
+              |  kubeconfig   |
+              +---------------+
+
+make manifests && make install
+
+
+
+
+
+if you changed your spec do write :- 
+
+make manifests in cmd
+
+it creates a manifest file of your go struct
+in under crd/bases
+
+
+
+
+The person (you) makes a change in the spec. In practice you edit the Go struct in ec2instance_types.go, for example by adding a new field such as sshKey.
+That change produces a new version of the CRD, the one marked V2. You don't write the CRD YAML by hand. make manifests reads your Go types and generates it.
+
+
+The cluster already holds the old CRD (V1),  
+Below it is the CR, the actual EC2Instance objects created from that CRD.
+
+
+The link between them: make install and kubeconfig
+
+
+make manifests && make install
+
+make manifests generates the new CRD YAML (V2) from your Go code.
+make install applies that CRD to the cluster, replacing V1 with V2
+
+
+edit the spec (Go types)
+        ↓
+make manifests   →  new CRD YAML generated (V2)
+        ↓
+make install     →  sent to the cluster using the kubeconfig
+        ↓
+cluster now has CRD V2  →  CRs are created from it
+
+
+
+
+
+
+what happens under the hood after writing Go structs :- 
+
+
+
+1. Build Time: Structs → CRD YAML (One-Time Setup)
+
+The Kubernetes API server comes pre-compiled with built-in Go structs 
+(like Pod and Deployment), so it already knows how to validate them. 
+However, it wasn't compiled with your custom types.go code.
+
+• When you run make manifests, a tool (controller-gen) reads your types.go 
+structs and generates a CustomResourceDefinition (CRD) YAML file.
+
+• You apply this YAML once to dynamically register your custom schema with 
+the API server so it knows what fields to expect and how to validate 
+incoming requests.
+
+
+
+
+2. Runtime: Structs <-> JSON (The Reconciliation Loop)
+
+When your operator is actually running in the cluster, YAML is completely out 
+of the picture. Your operator's Manager and the Kubernetes API server run as 
+separate processes (and likely on different nodes), 
+so they cannot directly share Go memory. Instead, 
+they communicate over the network via HTTP:
+
+1. You write Go structs in controller.go (e.g., creating a Deployment struct or updating your custom resource's .Status struct).
+
+2. Manager serializes to JSON: When you call r.Create(ctx, myDeployment) or r.Status().Update(ctx, myCustomResource), 
+the manager's client converts your Go struct into JSON (using the json:"..." struct tags in types.go) and sends an HTTP POST/PUT request to the API server.
+
+3. API Server deserializes to Structs/Map: The API server receives that JSON, validates it against the CRD schema you registered earlier, and stores it in etcd.
+
+4. Watching works in reverse: When a user applies a YAML file for your custom resource, the API server converts it to JSON, and your operator's manager receives 
+that JSON stream over an HTTP Watch connection and automatically unmarshals it back into your types.go Go struct before triggering Reconcile().
+
+In short: YAML is only generated beforehand so the API server can learn your schema; JSON is the wire format your operator 
+uses to talk to the API server over HTTP at runtime.
+
+
+
+
+
+
+
+
+How request comes to operator for Reconciliation ?
+
+
+1. Who converts YAML to JSON
+
+kubectl does it, before the request is sent. The API server receives JSON 
+(or protobuf) over HTTPS. It doesn't see your YAML file.
+
+2. What the API server does
+
+It does more than serialize. It authenticates the request, checks 
+permissions (RBAC), runs the webhooks if you have any (defaulter, 
+then validator), validates the object against the CRD schema, and 
+stores it in etcd. The object is now saved in the cluster.
+
+3. The API server doesn't send it to your controller
+
+Your controller watches the API server. When your operator starts, 
+its manager opens a watch connection for EC2Instance resources and 
+keeps a local cache up to date. When the new object is saved, 
+the API server publishes a change event on that watch. The cache sees it, 
+and the event goes through the predicate and into the controller's queue.
+
+kubectl apply (YAML → JSON)
+        ↓
+API server: auth → webhooks (optional) → validate → store in etcd
+        ↓  (watch event)
+Your operator's manager: cache → predicate → queue
+        ↓
+Reconcile()  →  observe, compare, act
+"Controller manager"
+
+Be careful with the name here. kube-controller-manager is Kubernetes' 
+own built-in process, which runs the controllers for Pods, Deployments 
+and so on. It doesn't run your code.
+
+Your reconcile loop lives in your operator's own process, the main.go 
+we went through. It has its own manager (from controller-runtime), 
+either on your laptop with make run or in a Pod with make deploy. 
+So a better way to say it is: the event reaches your operator's manager, 
+which calls your Reconcile().
+
+
+
+
+
+What happens under the hood when you run kubectl command ? which all processes starts ?
+
+
+
+
+
+1. What happens when you run kubectl
+
+Take kubectl get pods as the example. There are two halves: what runs on your machine, and what runs in the cluster.
+
+On your machine (kubectl itself, a single process):
+
+1. Parse the command: Cobra (the CLI library) parses the verb and flags.
+
+2. Load kubeconfig: reads ~/.kube/config (or $KUBECONFIG) to find the current context, the API server URL, the CA cert, 
+and credentials (client cert, token, or an exec plugin such as aws eks get-token).
+
+3. API discovery: kubectl asks the server what resource types exist (/api, /apis) and caches the result in ~/.kube/cache. 
+This is how it maps pods to GET /api/v1/namespaces/default/pods.
+
+4. Build and send the HTTPS request: with auth attached. For apply/create it first validates and serializes your YAML to JSON.
+
+In the cluster (control plane):
+
+1. kube-apiserver handles the request in this order: authentication (who are you?), 
+then authorization (RBAC: can you do this?), then admission controllers (mutating and validating webhooks, defaults, quotas), 
+then schema validation. For writes it persists to etcd.
+
+2. etcd stores the cluster state. Only the API server talks to it.
+
+3. For reads, the API server returns the data and kubectl formats it into a table.
+
+
+
+
+For writes (kubectl apply -f deploy.yaml), a chain of components reacts via watches on the API server:
+
+1. Controller manager (Deployment controller, then ReplicaSet controller) creates ReplicaSet and Pod objects.
+
+2. kube-scheduler sees Pods with no node assigned, filters and scores nodes, and writes the binding.
+
+3. kubelet on the chosen node sees the Pod assigned to it and tells the container runtime (containerd or CRI-O, via CRI) 
+to pull images and start containers. CNI plugins set up pod networking, and CSI handles volumes.
+
+4. kube-proxy (or the CNI) updates Service routing rules (iptables/IPVS/eBPF).
+
+5. Kubelet reports status back to the API server, which is what you see in kubectl get pods.
+
+
+Processes in short:
+
+Client: kubectl
+Control plane: kube-apiserver, etcd, kube-scheduler, kube-controller-manager (plus cloud-controller-manager on cloud setups)
+Each node: kubelet, kube-proxy, container runtime (containerd/CRI-O), CNI plugin
+
+You can see all of this yourself with kubectl get pods -v=8 (shows the HTTP calls) or -v=6 for a lighter view.
+
+
+
+
+
+
+
+
+
+
+Why we get CrashLoopBackOff Error ? 
+
+
+
+CrashLoopBackOff is not an error in itself. It means a container starts, exits, and kubelet keeps restarting it, waiting longer 
+between attempts each time (10s, 20s, 40s... capped at 5 minutes). That wait is the "BackOff".
+
+Common causes:
+
+Application crashes on startup: a bug, an unhandled exception, or a missing dependency.
+Bad config: missing or wrong env vars, ConfigMap or Secret not mounted or wrongly keyed, bad config file.
+Can't reach a dependency: the DB or another service is down or the connection string is wrong, and the app exits.
+Wrong command or args: a bad command/args in the spec, or a container that runs a short task and exits (exit code 0 also causes restarts if restartPolicy: Always).
+OOMKilled: memory limit too low, so the kernel kills the process (exit code 137).
+Failing liveness probe: kubelet kills a healthy-but-slow container (for example, the probe fires before the app finishes starting; use a startupProbe or a longer initialDelaySeconds).
+Permission problems: a non-root user can't write to a volume, a read-only filesystem, or wrong file permissions.
+Wrong image or entrypoint: an architecture mismatch (arm64 vs amd64) gives exec format error.
+
+
+
+How to debug:
+
+
+kubectl describe pod <pod>            # Events, Last State, Exit Code, Reason
+kubectl logs <pod>                    # current container logs
+kubectl logs <pod> --previous         # logs from the crashed instance (the key one)
+kubectl logs <pod> -c <container>     # multi-container pods
+kubectl get pod <pod> -o yaml         # check lastState.terminated
+kubectl get events --sort-by=.lastTimestamp
+kubectl debug -it <pod> --image=busybox --target=<container>   # ephemeral debug container
+
+Reading the exit code:
+
+0: the process finished normally, so it isn't a long-running service
+1: application error
+137: SIGKILL, usually OOMKilled (check Reason: OOMKilled)
+139: segfault
+143: SIGTERM (graceful termination)
+
+
+
+
+
+
+
+
+
+
+
+
+
+in one terminal :- 
+go run cmd/main.go :- it runs your manager
+
+in another terminal:- 
+
+kubectl -f example/instance.yaml create
+kubectl -f example/instance.yaml delete
+
+
+after changing the instance.yaml do :- 
+
+kubectl apply -f example/instance.yaml
+
+to see the Reconciliation run again 
+
+
+
+
+
+
+
+Admission Controllers :- 
+
+
+Piece of code that intercepts requests to API SERVER AFTER AUTHENTICATION & AUTHORIZATION. (Built-in plugins)
+
+APPLICABLE TO CREATE, DELETE or MODIFY objects.
+
+
+
+
+(user)
+  |
+  | API CALL
+  v
++------------+        +------+
+| API SERVER |------->|  AA  |   (AA = Authentication & Authorization)
++------------+        +--+---+
+                         |
+                         | INVOKE
+                         v
+                +-----------------------+        (Special controllers)
+                |  Admission            |-------> Mutating webhook
+                |  Controllers          |-------> Validating Admission Policies
+                |                       |-------> Validating webhook
+                +-----+-----------+-----+
+                      |           |
+                      |           | (if allowed)
+                      |           v
+                      |        +------+
+                      |        | ETCD |
+                      |        +------+
+                      |
+                      | Allow / Reject Request
+                      v
+                    (back to the user)
+
+
+
+
+
+1. The user makes an API call to the API server.
+2. The API server first checks authentication and authorization (AA).
+3. If that passes, it invokes the admission controllers, which use the three special kinds: the mutating webhook, validating admission policies, and the validating webhook.
+4. The admission controllers either allow or reject the request, and the answer goes back to the user.
+   If allowed, the object is saved in etcd.
+
+
+
+
+
+Only two of the three are actually webhooks. The third, Validating Admission Policies, does the same job as a validating webhook without any webhook. All three run in the admission stage, after authentication and authorization and before the object is saved to etcd.
+
+1. Mutating webhook: changes the request
+
+It can modify the object before it is saved. The API server sends the object to your webhook server, and the webhook replies with the changes to make.
+
+For your EC2Instance:
+
+The user leaves out instanceType, and the webhook sets it to t3.micro.
+It adds a default tag such as managed-by: ec2-operator.
+
+This is the Defaulter from the controller-runtime diagram. It runs first, so that later checks see the final version of the object.
+
+
+
+
+2. Validating webhook: accepts or rejects the request
+
+It can only say yes or no. It can't change anything. The API server sends the object to your webhook server, and the webhook runs your Go code and replies allowed or denied, with a message.
+
+For your EC2Instance:
+
+Reject it if amiID doesn't start with ami-.
+Reject it if instanceType isn't in an allowed list.
+Reject an update that tries to change amiID after the instance was created.
+
+The user sees the rejection message right at kubectl apply. This is the Validator from the controller-runtime diagram. It runs after the mutating step.
+
+
+
+
+
+3. Validating Admission Policies: the same, without a webhook
+
+This is a built-in Kubernetes feature that does validation without running any server. You write the rule as a small 
+expression in a language called CEL inside a YAML object, and the API server evaluates it itself.
+
+
+validations:
+  - expression: "object.spec.amiID.startsWith('ami-')"
+    message: "amiID must start with ami-"
+
+
+
+
+
+
+
+
+
+
+
+
+Reconcile based on conditions:- 
+
+
+It's a table of what the controller does after your Reconcile() returns, based on what you return. Your Reconcile() returns two things, a ctrl.Result and an error, and the controller checks them in priority order. The first matching level decides, and the later levels are never looked at.
+
+The four levels
+
+Level 1: Error
+You return a non-nil error.
+
+The Result is completely ignored, even if you set RequeueAfter in it.
+The controller retries with exponential backoff: the wait gets longer after each failure (for example 5ms, 10ms, 20ms, and so on, up to a maximum of about 16 minutes). This stops a failing object from hammering the API server.
+This is the self-healing path from your sad-path diagram.
+
+return ctrl.Result{}, err
+
+Level 2: RequeueAfter
+No error, and you set RequeueAfter.
+
+The controller runs this object again after the fixed delay you chose.
+This is the forever loop he underlined. If you always return it, the object is re-checked on a timer forever.
+
+return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
+
+Level 3: Requeue
+No error, Requeue: true, and no RequeueAfter.
+
+The controller runs it again, using exponential backoff for the delay.
+
+return ctrl.Result{Requeue: true}, nil
+
+Newer controller-runtime versions are phasing this flag out in favor of RequeueAfter, so it may show a deprecation warning in your version.
+
+Level 4: Nothing
+No error and no requeue flags.
+
+The controller stops for this object. It runs again only when a new event arrives, such as the object changing.
+
+return ctrl.Result{}, nil
+
+
+
+You return	                                        What happens next
+
+ctrl.Result{}, err	                                Retry with growing delays (the Result is ignored)
+ctrl.Result{RequeueAfter: 60*time.Second}, nil	    Run again after exactly 60 seconds, repeatedly
+ctrl.Result{Requeue: true}, nil	                    Run again with backoff delay
+ctrl.Result{}, nil	                                Done. Wait for the next event.
+
+
+
+What exponential backoff means
+
+The delay doubles after each consecutive failure: short at first, then longer and longer. 
+If something is broken, the controller retries quickly in case it was a brief problem, then slows 
+down so it isn't spamming. When a run succeeds, the delay resets.
+
+i think 1000ms is the threshold value until when the exponential backoff will run
+
+
+State	            Meaning
+nil	              There is no error. Everything worked.
+non-nil	          There is an error. It holds a message saying what went wrong.
+
+
+
+
+
+
+
+
+
+controller runtime gets request from where in k8s operator ?
+
+
+
+controller-runtime gets the request from the Kubernetes API server, 
+through a watch. Nobody sends your operator a request directly. 
+Your operator opens a connection to the API server and listens for changes.
+
+The path of one request
+
+
+You: kubectl apply  →  API server saves the object in etcd
+                              │
+                              │  watch connection (opened by your operator)
+                              ▼
+                  Informer + Cache (inside the manager)
+                              │
+                              ▼
+                  Event: "EC2Instance default/my-ec2-instance changed"
+                              │
+                              ▼
+                  Predicate (optional filter)
+                              │
+                              ▼
+                  Work queue  ← holds only namespace/name
+                              │
+                              ▼
+                  Reconcile(ctx, req)   ← req is built from the queue item
+
+
+
+req.Namespace and req.Name tell you which object this Reconcile call is for.
+there can be different object as well
+
+Each controller has its own Reconcile() function with its own logic. What's the same is the signature, the shape of the function:
+
+
+
+
+
+
+
+
+
+
+kubectl explain ec2instance.spec
+
+kubectl get ec2instance -o yaml | less
